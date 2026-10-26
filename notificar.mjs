@@ -18,6 +18,25 @@ const LIMITE = Number(process.env.LIMITE || 10);               // máximo de iss
 const DRY = process.env.DRY_RUN === '1';                       // vista previa: guarda el HTML en vez de enviar
 const TO = process.env.MAIL_TO || process.env.GMAIL_USER;      // admite varios separados por coma
 const ES_COLABORADOR = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const SOLO_SOLICITUDES = process.env.SOLO_SOLICITUDES !== '0';  // 0 = avisar de cualquier comentario
+
+// Frases que indican que alguien PIDE el issue (español e inglés)
+const PIDE = [
+  /\bme\s+(lo\s+|la\s+)?(pueden\s+|puedes\s+|podr[ií]an\s+|podr[ií]as\s+|puedan\s+)?asign/i,   // me lo pueden asignar, me asignan
+  /\bas[ií]g[nñ]\w*(me|nos)\b/i,                                                                // asígname, asígnenme, asignarme
+  /(?<!\bno\s+)\bquiero\s+(yo\s+)?(tomar\w*|trabajar\w*|hacer\w*|resolver\w*|encargar\w*|agarrar\w*|participar|colaborar|este|ese|el)\b/i,
+  /\bquisiera\s+(tomar\w*|trabajar\w*|hacer\w*|resolver\w*|encargar\w*|agarrar\w*|participar|colaborar|este|ese|el)\b/i,
+  /\bme\s+gustar[ií]a\s+(tomar|trabajar|hacer|resolver|encargar|agarrar|participar|colaborar)/i,
+  /(?<!\bno\s+)\bpuedo\s+(yo\s+)?(tomar\w*|trabajar\w*|hacer\w*|encargar\w*|resolver\w*|agarrar\w*|ayudar)\b/i,
+  /\b(lo|la|este|el)\s+tomo\b|\byo\s+(lo\s+)?(hago|tomo|resuelvo|trabajo|agarro)\b|\bme\s+encargo\b|\blo\s+hago\s+yo\b|\bme\s+ofrezco\b/i,
+  /\bsolicito\s+(que\s+)?(me|este|el|ser)\b|\bpido\s+(este|el|que\s+me|ser\s+asignad)/i,
+  /\btomar\s+(este|el)\s+issue\b|\btrabajar\s+en\s+(este|el)\s+issue\b/i,
+  /\bassign\s+(it\s+to\s+)?me\b|\bcan\s+i\s+(work|take|try)\b|\bi('d|\s+would)\s+like\s+to\s+(work|take|do)\b|\bi('ll|\s+will)\s+take\b/i,
+];
+const PARALELO = /\bparalelo\s+[A-E]\b/;            // «…, nombre y apellido, paralelo B»: formato típico de solicitud
+// Mensajes que NO son solicitudes aunque nombren la palabra «asignar»
+const NO_PIDE = /qued[oó]\s+libre|sin\s+actividad|se\s+lo\s+asign(e|en|es)\b|ya\s+(est[aá]|fue|qued[oó])\s+asignad|\basignad[oa]s?\s+(a|para)\b|\bte\s+(lo\s+|la\s+)?asign(o|é|amos|aron)\b|\blo\s+asign(o|é)\b/i;
+const esSolicitud = txt => { const t = txt || ''; return !NO_PIDE.test(t) && (PIDE.some(r => r.test(t)) || PARALELO.test(t)); };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -47,9 +66,22 @@ const comentariosDe = async issue => {
   if (!cacheComentarios.has(issue.comments_url)) cacheComentarios.set(issue.comments_url, await ghAll(issue.comments_url));
   return cacheComentarios.get(issue.comments_url);
 };
-// Primer comentario de alguien que no es el autor del issue ni un bot = la solicitud ganadora
-const primeraSolicitud = async issue =>
-  (await comentariosDe(issue)).find(c => c.user && c.user.type !== 'Bot' && c.user.login !== issue.user.login);
+const cacheEventos = new Map();
+// Momento en que el issue quedó libre por última vez: las solicitudes anteriores ya no valen
+const liberadoEn = async issue => {
+  if (!cacheEventos.has(issue.events_url)) {
+    let t = 0;
+    try { for (const e of await ghAll(issue.events_url)) if (e.event === 'unassigned') t = Math.max(t, new Date(e.created_at).getTime()); } catch {}
+    cacheEventos.set(issue.events_url, t);
+  }
+  return cacheEventos.get(issue.events_url);
+};
+// Primer comentario (de quien no es el autor ni un bot) que PIDE el issue, posterior a la última liberación = solicitud ganadora
+const primeraSolicitud = async issue => {
+  const desde = await liberadoEn(issue);
+  return (await comentariosDe(issue)).find(c => c.user && c.user.type !== 'Bot' && c.user.login !== issue.user.login &&
+    new Date(c.created_at).getTime() > desde && (!SOLO_SOLICITUDES || esSolicitud(c.body)));
+};
 
 function correoHtml(d) {
   const cuerpo = esc(d.comentario.body.length > 1500 ? d.comentario.body.slice(0, 1500) + '…' : d.comentario.body).replace(/\r?\n/g, '<br>');
@@ -118,10 +150,12 @@ async function main() {
         if (issue.pull_request || issue.state !== 'open') { marcar(); continue; }       // regla 1
         if ((issue.assignees || []).length) { marcar(); continue; }                     // regla 2
         if (usuario === issue.user.login) { marcar(); continue; }                       // regla 3
+        if (SOLO_SOLICITUDES && !esSolicitud(c.body)) { marcar(); continue; }           // solo comentarios que piden el issue
 
         const primera = await primeraSolicitud(issue);                                  // regla 4
-        const esPrimera = primera?.id === c.id;
-        if (!esPrimera && primera?.user.login === usuario) { marcar(); continue; }     // el mismo usuario insistiendo
+        if (!primera) { marcar(); continue; }                                           // comentario anterior a la última liberación
+        const esPrimera = primera.id === c.id;
+        if (!esPrimera && primera.user.login === usuario) { marcar(); continue; }     // el mismo usuario insistiendo
 
         // ---- conteo X/10 ----
         const asignados = (await gh(`/search/issues?per_page=1&q=${encodeURIComponent(`${repoQ} is:issue is:open assignee:${usuario}`)}`)).total_count;
