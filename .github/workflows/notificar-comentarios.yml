@@ -1,0 +1,40 @@
+name: Notificar comentarios por Gmail
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # cada 10 min; GitHub permite desde 5 y a veces retrasa
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: notificar
+  cancel-in-progress: false
+
+jobs:
+  notificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - name: Revisar comentarios y enviar correos
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}              # opcional: varios correos separados por coma
+          MI_USUARIO: ${{ github.repository_owner }}   # tus propios comentarios no te avisan
+        run: node notificar.mjs
+      - name: Guardar comentarios ya avisados
+        run: |
+          if [ -n "$(git status --porcelain estado.json)" ]; then
+            git config user.name "notificador"
+            git config user.email "notificador@users.noreply.github.com"
+            git add estado.json
+            git commit -m "chore: actualizar estado"
+            git push
+          fi
