@@ -33,15 +33,10 @@ Los pasos de instalación, configuración de las credenciales y ejecución del s
 
 ## 👥 Creadores y contribuyentes
 
-### Creador
+### Creadores
 
 - **Denzel** — [@denpimen08-debug](https://github.com/denpimen08-debug)
-
-### Contribuyentes
-
-Las personas que colaboren en el desarrollo, mantenimiento o mejora del proyecto podrán añadirse en esta sección.
-
-- [@usuario](https://github.com/usuario) — Descripción de la contribución.
+- **Omar** — [@RumoRybak](https://github.com/RumoRybak)
 
 ## 📄 Licencia
 
