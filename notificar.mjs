@@ -7,6 +7,7 @@
 //   3. quien comenta NO es el autor del issue,
 //   4. es el PRIMER comentario de ese tipo en el issue (si llega otro, el correo avisa que ya había una solicitud previa).
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 const API = process.env.API_BASE || 'https://api.github.com';
 const OWNER = process.env.OWNER || 'sis-inf';
@@ -17,6 +18,8 @@ const HORAS = Number(process.env.VENTANA_HORAS || 3);          // cuánto hacia 
 const LIMITE = Number(process.env.LIMITE || 10);               // máximo de issues por usuario
 const DRY = process.env.DRY_RUN === '1';                       // vista previa: guarda el HTML en vez de enviar
 const TO = process.env.MAIL_TO || process.env.GMAIL_USER;      // admite varios separados por coma
+const BORRAR = process.env.BORRAR_ASIGNADOS !== '0';             // 0 = no tocar tu bandeja
+const PRUEBA_BORRADO = ['1', 'true'].includes(process.env.BORRADO_PRUEBA); // solo lista lo que borraría
 const ES_COLABORADOR = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const SOLO_SOLICITUDES = process.env.SOLO_SOLICITUDES !== '0';  // 0 = avisar de cualquier comentario
 
@@ -115,6 +118,50 @@ function correoHtml(d) {
 </table></td></tr></table></body></html>`;
 }
 
+// Borra de tu bandeja (a la Papelera, recuperable 30 días) los avisos de issues que ya se asignaron o cerraron.
+// Nunca toca correos marcados con estrella. `buzon` abstrae el acceso a Gmail para poder probar la lógica.
+export async function limpiarCorreos(buzon) {
+  const mensajes = await buzon.listar();
+  const cache = new Map(), aBorrar = [];
+  for (const m of mensajes) {
+    const x = /^\[sis-inf-bot\] Nuevo comentario en (\S+) #(\d+) — /.exec(m.subject || '');
+    if (!x || m.destacado || !REPOS.includes(x[1])) continue;
+    const clave = `${x[1]}#${x[2]}`;
+    let issue = cache.get(clave);
+    if (!issue) {
+      try { issue = await gh(`/repos/${OWNER}/${x[1]}/issues/${x[2]}`); } catch { continue; }
+      cache.set(clave, issue);
+    }
+    if (issue.state === 'closed' || (issue.assignees || []).length) aBorrar.push({ ...m, clave });
+  }
+  if (!aBorrar.length) { console.log('Bandeja: nada que borrar'); return 0; }
+  for (const m of aBorrar) console.log(`${PRUEBA_BORRADO ? 'Se borraría' : 'Borrando'}: ${m.clave} (${m.subject.slice(0, 80)})`);
+  if (!PRUEBA_BORRADO) await buzon.mover(aBorrar.map(m => m.uid));
+  return aBorrar.length;
+}
+
+async function buzonGmail() {
+  const { ImapFlow } = await import('imapflow');
+  const client = new ImapFlow({ host: 'imap.gmail.com', port: 993, secure: true, logger: false,
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD } });
+  await client.connect();
+  const lock = await client.getMailboxLock('INBOX');
+  return {
+    async listar() {
+      const uids = await client.search({ subject: '[sis-inf-bot]', since: new Date(Date.now() - 14 * 864e5) }, { uid: true });
+      const out = [];
+      if (uids && uids.length) for await (const msg of client.fetch(uids.join(','), { envelope: true, flags: true }, { uid: true }))
+        out.push({ uid: msg.uid, subject: msg.envelope?.subject, destacado: msg.flags?.has('\\Flagged') });
+      return out;
+    },
+    async mover(uids) {
+      const papelera = (await client.list()).find(b => b.specialUse === '\\Trash')?.path || '[Gmail]/Trash';
+      await client.messageMove(uids.join(','), papelera, { uid: true });
+    },
+    async cerrar() { lock.release(); await client.logout(); },
+  };
+}
+
 async function main() {
   let estado = { vistos: {} };
   try { estado = JSON.parse(await readFile('estado.json', 'utf8')); } catch {}
@@ -185,13 +232,21 @@ async function main() {
         if (colaborador) notas.push('Es colaborador: no puede asignarse a sí mismo, otro colaborador debe hacerlo.');
 
         const datos = { repo, issue, comentario: c, usuario, colaborador, asignados, solicitados, total, veredicto, notas };
-        const asunto = `[sis-inf-bot] Nuevo comentario en #${issue.number} — ${issue.title} · ${usuario} ${total}/${LIMITE}`;
+        const asunto = `[sis-inf-bot] Nuevo comentario en ${repo} #${issue.number} — ${issue.title} · ${usuario} ${total}/${LIMITE}`;
         const html = correoHtml(datos);
         if (DRY) { await writeFile(`salida/correo-${c.id}.html`, html); console.log('ASUNTO:', asunto, '|', veredicto.texto); }
         else await transporte.sendMail({ from: `sis-inf-bot <${process.env.GMAIL_USER}>`, to: TO, subject: asunto, html });
         enviados++; marcar();
       } catch (e) { console.error(`Comentario ${c.id}: ${e.message}`); fallos++; }       // se reintenta en la próxima ejecución
     }
+  }
+
+  // Limpieza de la bandeja: si falla no afecta a los avisos
+  if (BORRAR && !DRY && process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
+    let buzon;
+    try { buzon = await buzonGmail(); await limpiarCorreos(buzon); }
+    catch (e) { console.warn('Aviso: no se pudo limpiar la bandeja:', e.message); }
+    finally { try { await buzon?.cerrar(); } catch {} }
   }
 
   for (const [id, t] of Object.entries(estado.vistos)) if (ahora - t > 3 * 864e5) { delete estado.vistos[id]; cambios = true; }
@@ -201,4 +256,4 @@ async function main() {
   console.log(`Correos enviados: ${enviados}${fallos ? ` · errores: ${fallos}` : ''}`);
   if (fallos) process.exitCode = 1;
 }
-main().catch(e => { console.error(e); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(e => { console.error(e); process.exit(1); });

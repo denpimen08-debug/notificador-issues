@@ -2,5 +2,8 @@
   "name": "notificador-issues",
   "private": true,
   "type": "module",
-  "dependencies": { "nodemailer": "6.9.16" }
+  "dependencies": {
+    "nodemailer": "6.9.16",
+    "imapflow": "^1.0.0"
+  }
 }

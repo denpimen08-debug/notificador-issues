@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"   # cada 10 min; GitHub permite desde 5 y a veces retrasa
   workflow_dispatch:
+    inputs:
+      probar_borrado:
+        description: 'Solo listar los correos que se borrarían, sin borrar nada'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +31,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          BORRADO_PRUEBA: ${{ github.event.inputs.probar_borrado }}
           MAIL_TO: ${{ secrets.MAIL_TO }}              # opcional: varios correos separados por coma
           MI_USUARIO: ${{ github.repository_owner }}   # tus propios comentarios no te avisan
         run: node notificar.mjs
